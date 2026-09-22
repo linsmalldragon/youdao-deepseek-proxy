@@ -64,6 +64,50 @@ cargo build --release
 cargo run
 ```
 
+## Prebuilt binaries (GitHub Releases)
+
+Prebuilt binaries are published on every push to `main` (and on `v*` tags) at
+[Releases](https://github.com/linsmalldragon/youdao-deepseek-proxy/releases).
+Pick the asset for your platform, verify it, unpack, and run.
+
+| Asset                                    | Platform                    |
+| ---------------------------------------- | --------------------------- |
+| `youdao-llm-proxy-aarch64-apple-darwin`  | macOS, Apple Silicon (arm64) |
+| `youdao-llm-proxy-x86_64-unknown-linux-gnu` | Linux x86_64 (amd64)      |
+
+```bash
+# <tag> = the release tag you're downloading, e.g. build-2 or v1.0.0
+base=https://github.com/linsmalldragon/youdao-deepseek-proxy/releases/download/<tag>
+
+# 1) download the asset + its SHA-256  (Apple Silicon example)
+curl -LO ${base}/youdao-llm-proxy-aarch64-apple-darwin.tar.gz
+curl -LO ${base}/youdao-llm-proxy-aarch64-apple-darwin.tar.gz.sha256
+
+# 2) verify the download
+shasum -a 256 -c youdao-llm-proxy-aarch64-apple-darwin.tar.gz.sha256   # macOS
+# sha256sum -c youdao-llm-proxy-aarch64-apple-darwin.tar.gz.sha256     # Linux
+
+# 3) unpack
+tar -xzf youdao-llm-proxy-aarch64-apple-darwin.tar.gz
+
+# 4) run  (the executable lives inside the unpacked folder)
+./youdao-llm-proxy-aarch64-apple-darwin/youdao-llm-proxy
+# -> listens on http://127.0.0.1:8080 by default
+
+# optional: inject device credentials before starting
+YOUDAO_YDUUID=... YOUDAO_IMEI=... YOUDAO_COOKIE=... \
+  ./youdao-llm-proxy-aarch64-apple-darwin/youdao-llm-proxy
+```
+
+Notes:
+- The archive contains `youdao-llm-proxy` (the executable) plus a `BUILD` file
+  recording the target and commit. If the binary lost its execute bit on
+  unpack, `chmod +x` it.
+- Match the asset to your CPU: the arm64 macOS binary will not run on an Intel
+  Mac, and the Linux asset is x86_64 only.
+- `build-N` releases are auto-published per commit (pre-releases); `v*` releases
+  are the tagged, "official" ones.
+
 ## Configuration
 
 Everything is a `YOUDAO_*` env var layered over built-in defaults that mirror
