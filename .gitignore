@@ -1,0 +1,9 @@
+# Cargo build artifacts
+/target
+
+# Agent / editor local metadata (never commit)
+.smalltarget/
+
+# OS / editor noise
+.DS_Store
+*.log
