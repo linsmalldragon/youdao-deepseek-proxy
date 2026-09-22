@@ -173,13 +173,12 @@ async fn chat_completions(
     };
 
     // Tool-calling turn: the model's `[TOOL_CALL]` markers must be parsed from
-    // the complete reply, so we always aggregate to discover `tool_calls`.
-    //
-    // Streaming is still progressive: `tool_stream_response` forwards each
-    // upstream content/reasoning delta the moment it arrives, and only starts
-    // buffering once the first `[TOOL_CALL]` marker shows up (tool calls are
-    // emitted after the prose, so the visible text keeps flowing). The parsed
-    // tool-call deltas are appended at the end, before the finish chunk.
+    // the complete reply, so `tool_stream_response` aggregates it: reasoning
+    // deltas stream through the moment they arrive (the visible "thinking"),
+    // while the marker-stripped content and the parsed tool-call deltas are
+    // emitted together only once the reply is complete — that is what keeps
+    // raw marker text out of `content`. The finish chunk, a trailing usage
+    // frame and `[DONE]` follow.
     if tools.is_some() {
         if req.stream {
             return tool_stream_response(

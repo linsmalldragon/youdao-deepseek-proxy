@@ -186,17 +186,25 @@ fn tool_protocol(
 /// `[TOOL_CALL]{...}` blocks. It is *flaky* about the exact shape — it sometimes
 /// omits the closing `[/TOOL_CALL]` marker, flattens the arguments into
 /// top-level fields (e.g. `{"name":"Bash","command":"..."}` instead of
-/// `{"name":"Bash","arguments":{"command":"..."}}`), or batches several
-/// commands into a top-level `commands` array with an empty `arguments`
-/// object. So this parser is lenient: it grabs the first balanced-JSON object
-/// after each opening marker (with or without a closing marker) and normalizes
-/// it to one or more OpenAI tool calls.
+/// `{"name":"Bash","arguments":{"command":"..."}}`), batches several
+/// commands into a top-level `commands` array, or emits a broken block
+/// outright (an object that never closes, a stray `]` where the final `}`
+/// should be). So this parser is lenient: it grabs the first balanced-JSON
+/// object after each opening marker (with or without a closing marker) and
+/// normalizes it to one or more OpenAI tool calls.
 ///
-/// Returns the cleaned `content` (marker + JSON removed) and the `tool_calls`,
-/// each shaped `{id, type:"function", function:{name, arguments:"<json>"}}`.
+/// A marker whose JSON cannot be parsed is a failed tool call, not prose —
+/// keeping it would leak raw `[TOOL_CALL]{...}` text into the visible reply
+/// and into the conversation history on the next turn. Broken blocks are
+/// therefore dropped from `content` (a WARN carries a head of the raw text);
+/// the model typically re-emits the intended call on the following turn.
+/// A marker with *no* JSON after it is kept as literal text, and any later
+/// markers are still parsed.
+///
+/// Returns the cleaned `content` (unparseable blocks removed) and the
+/// `tool_calls`, each shaped `{id, type:"function", function:{name, arguments:"<json>"}}`.
 pub fn parse_tool_calls(content: &str) -> (String, Vec<serde_json::Value>) {
     const OPEN: &str = "[TOOL_CALL]";
-    const CLOSE: &str = "[/TOOL_CALL]";
 
     let mut cleaned = String::with_capacity(content.len());
     let mut calls: Vec<serde_json::Value> = Vec::new();
@@ -224,43 +232,85 @@ pub fn parse_tool_calls(content: &str) -> (String, Vec<serde_json::Value>) {
                 }
 
                 if k < n && content[k..].starts_with('{') {
-                    if let Some((json_str, end)) = extract_balanced_json(content, k) {
-                        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                            let (name, args_list) = normalize_tool_call(&obj);
-                            for args in args_list {
-                                let id = format!("call_{}", calls.len());
-                                calls.push(serde_json::json!({
-                                    "id": id,
-                                    "type": "function",
-                                    "function": { "name": &name, "arguments": args }
-                                }));
+                    match extract_balanced_json(content, k) {
+                        Some((json_str, end)) => match serde_json::from_str::<serde_json::Value>(
+                            &json_str,
+                        ) {
+                            Ok(obj) => {
+                                let (name, args_list) = normalize_tool_call(&obj);
+                                for args in args_list {
+                                    let id = format!("call_{}", calls.len());
+                                    calls.push(serde_json::json!({
+                                        "id": id,
+                                        "type": "function",
+                                        "function": { "name": &name, "arguments": args }
+                                    }));
+                                }
+                                i = consume_past_close_marker(content, end);
+                                continue;
                             }
-                            // Consume the optional closing marker that may follow.
-                            let mut m = end;
-                            while m < n && content[m..].chars().next().unwrap().is_whitespace() {
-                                m += 1;
+                            Err(e) => {
+                                // Balanced braces but not valid JSON: drop the
+                                // block instead of leaking raw marker text.
+                                tracing::warn!(
+                                    error = %e,
+                                    head = %drop_head(&json_str),
+                                    "dropping unparseable [TOOL_CALL] block"
+                                );
+                                i = consume_past_close_marker(content, end);
+                                continue;
                             }
-                            if content[m..].starts_with(CLOSE) {
-                                m += CLOSE.len();
-                            }
-                            i = m;
+                        },
+                        None => {
+                            // The object never closes — it may run straight
+                            // into the next marker or end the reply. Drop this
+                            // block up to the next marker (or EOF) so later
+                            // calls still parse.
+                            let region_end = content[k..]
+                                .find(OPEN)
+                                .map(|r| k + r)
+                                .unwrap_or(n);
+                            tracing::warn!(
+                                head = %drop_head(&content[k..region_end]),
+                                "dropping unbalanced [TOOL_CALL] block"
+                            );
+                            i = region_end;
                             continue;
                         }
-                        // JSON that does not parse: keep the raw text, stop stripping.
-                        cleaned.push_str(OPEN);
-                        cleaned.push_str(&content[mark_start + OPEN.len()..end]);
-                        i = end;
-                        continue;
                     }
                 }
-                // No usable JSON after the marker: keep it as literal text.
+                // No JSON after the marker: keep it as literal text, keep
+                // scanning — a later marker may still be a valid call.
                 cleaned.push_str(OPEN);
-                cleaned.push_str(&content[mark_start + OPEN.len()..]);
-                i = n;
+                i = mark_start + OPEN.len();
             }
         }
     }
     (cleaned, calls)
+}
+
+/// Move past an optional `[/TOOL_CALL]` closing marker (and the whitespace
+/// before it) that follows a parsed JSON span.
+fn consume_past_close_marker(content: &str, end: usize) -> usize {
+    const CLOSE: &str = "[/TOOL_CALL]";
+    let mut m = end;
+    while m < content.len() {
+        let ch = content[m..].chars().next().unwrap();
+        if ch.is_whitespace() {
+            m += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if content[m..].starts_with(CLOSE) {
+        m += CLOSE.len();
+    }
+    m
+}
+
+/// Short head of a dropped raw block for WARN logs.
+fn drop_head(s: &str) -> String {
+    s.chars().take(160).collect()
 }
 
 /// Given `s[start..]` begins with `{`, return the first balanced JSON object
@@ -631,5 +681,91 @@ mod tests {
         let (cleaned, calls) = parse_tool_calls("答案就是 42。");
         assert!(calls.is_empty());
         assert_eq!(cleaned, "答案就是 42。");
+    }
+
+    #[test]
+    fn drops_unbalanced_final_marker_keeps_earlier_calls() {
+        // Regression, live session "排查kubectl服务故障原因": the model emitted
+        // two valid markers, then a final one whose JSON object never closed
+        // (a stray `]` where the outer `}` should be). The old "keep it as
+        // literal text" fallback leaked the raw `[TOOL_CALL]{...}` block into
+        // the visible reply while the earlier calls still executed.
+        let content = concat!(
+            "\n\nd1 节点出现 DiskPressure 并触发驱逐，另有 milvus-proxy 探针失败。继续查节点资源与异常 Pod 详情。\n\n",
+            "[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"kubectl describe node d1 2>&1 | tail -60\",\"description\":\"查看 d1 节点资源状况与驱逐原因\"}}\n",
+            "[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"kubectl describe pod my-release-milvus-proxy-0 -n default 2>&1 | tail -40\",\"description\":\"查看 milvus-proxy 异常详情\"}}\n",
+            "[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"kubectl top nodes 2>&1\",\"description\":\"查看节点资源使用概况\"}]",
+        );
+        let (cleaned, calls) = parse_tool_calls(content);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].pointer("/function/name").unwrap(), "Bash");
+        let args0: serde_json::Value =
+            serde_json::from_str(calls[0].pointer("/function/arguments").unwrap().as_str().unwrap())
+                .unwrap();
+        assert!(args0["command"].as_str().unwrap().starts_with("kubectl describe node d1"));
+        let args1: serde_json::Value =
+            serde_json::from_str(calls[1].pointer("/function/arguments").unwrap().as_str().unwrap())
+                .unwrap();
+        assert!(args1["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("kubectl describe pod my-release-milvus-proxy-0"));
+        assert!(cleaned.contains("d1 节点出现 DiskPressure"));
+        assert!(!cleaned.contains("[TOOL_CALL]"), "marker leaked: {cleaned}");
+        assert!(!cleaned.contains("kubectl"), "broken block leaked: {cleaned}");
+    }
+
+    #[test]
+    fn drops_balanced_but_invalid_json_span() {
+        // A raw control character inside a JSON string keeps the braces
+        // balanced but makes serde_json reject the span; drop it and keep
+        // parsing the later valid marker.
+        let content = format!(
+            "继续定位。\n\
+             [TOOL_CALL]{{\"name\":\"Bash\",\"arguments\":{{\"command\":\"df -h\nwhoami\",\"description\":\"查磁盘\"}}}}\n\
+             [TOOL_CALL]{{\"name\":\"Bash\",\"arguments\":{{\"command\":\"kubectl get pods\",\"description\":\"查 Pod\"}}}}"
+        );
+        let (cleaned, calls) = parse_tool_calls(&content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].pointer("/function/arguments").unwrap().as_str().unwrap(),
+            "{\"command\":\"kubectl get pods\",\"description\":\"查 Pod\"}"
+        );
+        assert!(cleaned.contains("继续定位"));
+        assert!(!cleaned.contains("[TOOL_CALL]"), "marker leaked: {cleaned}");
+        assert!(!cleaned.contains("df -h"), "broken block leaked: {cleaned}");
+    }
+
+    #[test]
+    fn drops_unbalanced_block_that_runs_into_next_marker() {
+        // An unclosed object that runs straight into the next marker used to
+        // abort the whole parse (everything kept literal, zero calls). Now
+        // the broken block is dropped and the later marker still parses.
+        let content = concat!(
+            "[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"echo hi\"}\n",
+            "[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"uptime\"}}",
+        );
+        let (cleaned, calls) = parse_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].pointer("/function/arguments").unwrap().as_str().unwrap(),
+            "{\"command\":\"uptime\"}"
+        );
+        assert_eq!(cleaned, "");
+    }
+
+    #[test]
+    fn keeps_bare_marker_literal_and_parses_later_marker() {
+        // A marker with no JSON at all stays literal text (the model may be
+        // quoting the protocol); a later valid marker still parses.
+        let content = "格式是 [TOOL_CALL] 后跟 JSON，例如：\n[TOOL_CALL]{\"name\":\"Bash\",\"arguments\":{\"command\":\"uptime\"}}";
+        let (cleaned, calls) = parse_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].pointer("/function/arguments").unwrap().as_str().unwrap(),
+            "{\"command\":\"uptime\"}"
+        );
+        assert!(cleaned.contains("格式是 [TOOL_CALL] 后跟 JSON"));
+        assert!(!cleaned.contains("uptime"));
     }
 }
