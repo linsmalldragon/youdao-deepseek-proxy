@@ -13,19 +13,18 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN cargo fetch
 
-# ring (via rustls) is C and must be cross-compiled: the arm64 target needs
-# the cross C compiler in addition to the rust target.
+# Static musl binaries: the official rust image ships musl-tools, so the
+# C parts of ring cross-compile against musl without any host glibc
+# headers. No apt packages needed for either architecture.
 RUN case "${TARGETARCH}" in \
-      arm64) apt-get update \
-            && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
-            && rustup target add aarch64-unknown-linux-gnu ;; \
-      *)     rustup target add x86_64-unknown-linux-gnu ;; \
+      arm64) rustup target add aarch64-unknown-linux-musl ;; \
+      *)     rustup target add x86_64-unknown-linux-musl ;; \
     esac
 
 COPY src/ ./src/
 
-RUN T="$(case "${TARGETARCH}" in arm64) echo aarch64-unknown-linux-gnu ;; \
-        *) echo x86_64-unknown-linux-gnu ;; esac)" && \
+RUN T="$(case "${TARGETARCH}" in arm64) echo aarch64-unknown-linux-musl ;; \
+        *) echo x86_64-unknown-linux-musl ;; esac)" && \
     cargo build --release --target "${T}" && \
     mkdir -p /app/out && \
     install -m 0755 "target/${T}/release/youdao-llm-proxy" /app/out/youdao-llm-proxy
