@@ -13,8 +13,12 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN cargo fetch
 
+# ring (via rustls) is C and must be cross-compiled: the arm64 target needs
+# the cross C compiler in addition to the rust target.
 RUN case "${TARGETARCH}" in \
-      arm64) rustup target add aarch64-unknown-linux-gnu ;; \
+      arm64) apt-get update \
+            && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
+            && rustup target add aarch64-unknown-linux-gnu ;; \
       *)     rustup target add x86_64-unknown-linux-gnu ;; \
     esac
 
