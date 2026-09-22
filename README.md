@@ -109,6 +109,33 @@ Notes:
   `Cargo.toml`, commit it to `main`, then `git tag vX.Y.Z && git push origin
   vX.Y.Z` — the workflow builds every platform and publishes at that tag.
 
+## Docker
+
+Build the image locally and run it:
+
+```bash
+docker build -t youdao-llm-proxy .
+
+# publish the port; pass device credentials via -e if needed
+docker run --rm -p 8080:8080 \
+  -e YOUDAO_YDUUID=... -e YOUDAO_IMEI=... -e YOUDAO_COOKIE=... \
+  youdao-llm-proxy
+# -> http://127.0.0.1:8080
+```
+
+The image binds `0.0.0.0:8080` by default (override with `-e
+YOUDAO_BIND=...`) and runs as a non-root user.
+
+A multi-arch image (`linux/amd64`, `linux/arm64`) is published to
+[Docker Hub](https://hub.docker.com/r/linsmalldragon/youdao-deepseek-proxy)
+whenever a `vX.Y.Z` tag is pushed:
+
+```bash
+docker pull linsmalldragon/youdao-deepseek-proxy:latest
+# or pin a version:
+docker pull linsmalldragon/youdao-deepseek-proxy:v0.1.0
+```
+
 ## Configuration
 
 Everything is a `YOUDAO_*` env var layered over built-in defaults that mirror
