@@ -66,7 +66,7 @@ cargo run
 
 ## Prebuilt binaries (GitHub Releases)
 
-Prebuilt binaries are published on every push to `main` (and on `v*` tags) at
+Prebuilt binaries are published for every **version tag** (`vX.Y.Z`) at
 [Releases](https://github.com/linsmalldragon/youdao-deepseek-proxy/releases).
 Pick the asset for your platform, verify it, unpack, and run.
 
@@ -76,7 +76,7 @@ Pick the asset for your platform, verify it, unpack, and run.
 | `youdao-llm-proxy-x86_64-unknown-linux-gnu` | Linux x86_64 (amd64)      |
 
 ```bash
-# <tag> = the release tag you're downloading, e.g. build-2 or v1.0.0
+# <tag> = the release tag you're downloading, e.g. v0.1.0
 base=https://github.com/linsmalldragon/youdao-deepseek-proxy/releases/download/<tag>
 
 # 1) download the asset + its SHA-256  (Apple Silicon example)
@@ -101,12 +101,13 @@ YOUDAO_YDUUID=... YOUDAO_IMEI=... YOUDAO_COOKIE=... \
 
 Notes:
 - The archive contains `youdao-llm-proxy` (the executable) plus a `BUILD` file
-  recording the target and commit. If the binary lost its execute bit on
-  unpack, `chmod +x` it.
+  recording the version, target, and commit. If the binary lost its execute bit
+  on unpack, `chmod +x` it.
 - Match the asset to your CPU: the arm64 macOS binary will not run on an Intel
   Mac, and the Linux asset is x86_64 only.
-- `build-N` releases are auto-published per commit (pre-releases); `v*` releases
-  are the tagged, "official" ones.
+- Releases are cut per version tag only. To publish one: bump `version` in
+  `Cargo.toml`, commit it to `main`, then `git tag vX.Y.Z && git push origin
+  vX.Y.Z` — the workflow builds every platform and publishes at that tag.
 
 ## Configuration
 

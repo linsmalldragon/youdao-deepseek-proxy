@@ -1,10 +1,11 @@
 name: Release
 
-# Push to main  -> a build-N pre-release (auto-versioned, accumulates)
-# Push a v* tag -> a formal release at that tag
+# A release is cut ONLY when a version tag is pushed:
+#   1. bump `version` in Cargo.toml and commit it to main
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+# The tag must match the Cargo.toml version, otherwise the build fails.
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*' ]
 
 jobs:
@@ -21,6 +22,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
+      - id: verify
+        name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          [ -n "$ver" ] || { echo "::error::could not read version from Cargo.toml"; exit 1; }
+          if [ "${GITHUB_REF_NAME}" != "v${ver}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' does not match Cargo.toml version 'v${ver}'"
+            exit 1
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -36,7 +48,8 @@ jobs:
           pkg=youdao-llm-proxy-${{ matrix.target }}
           mkdir -p dist/${pkg}
           cp target/${{ matrix.target }}/release/youdao-llm-proxy dist/${pkg}/
-          printf 'target: %s\ncommit: %s\n' "${{ matrix.target }}" "${GITHUB_SHA:0:7}" > dist/${pkg}/BUILD
+          printf 'version: %s\ntarget: %s\ncommit: %s\n' \
+            "${{ steps.verify.outputs.version }}" "${{ matrix.target }}" "${GITHUB_SHA:0:7}" > dist/${pkg}/BUILD
           tar -C dist -czf "${pkg}.tar.gz" ${pkg}
           if command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
@@ -69,11 +82,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
-          name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Build #{0}', github.run_number) }}"
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           draft: false
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          generate_release_notes: false
+          prerelease: false
           files: |
             *.tar.gz
             *.sha256
