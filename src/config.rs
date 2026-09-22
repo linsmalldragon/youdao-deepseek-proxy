@@ -65,6 +65,13 @@ pub struct YoudaoConfig {
     pub cookie: Option<String>,
     /// Listen bind address for the OpenAI-compatible server.
     pub bind: String,
+    /// Context length (in tokens) the proxy reports to clients as
+    /// `max_model_len` (`/v1/models`, same field vllm/sglang expose),
+    /// `max_context_len` (`/get_model_info`) and `max_total_num_tokens`
+    /// (`/server_info`). Youdao does not publish an authoritative limit for
+    /// its LLM endpoint, so this is a configurable default matching the
+    /// model's self-reported window (128K). Override via YOUDAO_MAX_CONTEXT.
+    pub max_context: u32,
 }
 
 impl Default for YoudaoConfig {
@@ -97,6 +104,9 @@ impl Default for YoudaoConfig {
             token_override: None,
             cookie: None,
             bind: "127.0.0.1:8080".into(),
+            // The Youdao LLM endpoint is a large-context model; the app does not
+            // expose an authoritative limit, so report a 128K window by default.
+            max_context: 131_072,
         }
     }
 }
@@ -138,6 +148,10 @@ impl YoudaoConfig {
         c.token_override = env_opt("YOUDAO_TOKEN");
         c.cookie = env_opt("YOUDAO_COOKIE");
         c.bind = env_or("YOUDAO_BIND", &c.bind);
+        c.max_context = env::var("YOUDAO_MAX_CONTEXT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(c.max_context);
         c
     }
 
