@@ -2,12 +2,16 @@
 
 A small **Rust** microservice that bridges the LLM backend behind NetEase's
 Youdao Dictionary app — `luna-ai.youdao.com` — and exposes it as a standard
-**OpenAI / vLLM-compatible** `POST /v1/chat/completions` endpoint (JSON and
-SSE streaming, including the model's `reasoning_content` chain of thought).
+**OpenAI / vLLM-compatible** API (`POST /v1/chat/completions`, JSON and SSE
+streaming, including the model's `reasoning_content` chain of thought), plus
+**sglang-native** endpoints (`/generate`, `/server_info`, `/get_model_info`,
+`/model_info`).
 
 It reproduces the exact request the Youdao macOS client sends, so any
-OpenAI-compatible client (a chat UI, the `openai` SDK, etc.) can be pointed at
-it to reach the DeepSeek model Youdao serves under the hood.
+OpenAI-compatible client (a chat UI, the `openai` SDK, a coding agent, etc.)
+can be pointed at it to reach the DeepSeek model Youdao serves under the
+hood. When a request carries `tools`, the proxy emulates OpenAI tool calling
+end to end (see [Tool calling](#tool-calling)).
 
 > ⚠️ **Read the [Legal](#legal) section before using.** This talks to the
 > proprietary backend of a commercial app using reverse-engineed request
@@ -38,14 +42,35 @@ as OpenAI chunks:
 
 ## Endpoints
 
-| Route                    | Method | Description                                            |
-| ------------------------ | ------ | ------------------------------------------------------ |
-| `/v1/chat/completions`   | POST   | OpenAI-compatible chat; `"stream": true` for SSE, `false` for one JSON object |
-| `/v1/models`             | GET    | Lists a single `deepseek-r1` entry                     |
-| `/health`                | GET    | Liveness probe (`"ok"`)                                |
+| Route                                  | Method | Description                                            |
+| -------------------------------------- | ------ | ------------------------------------------------------ |
+| `/v1/chat/completions`                 | POST   | OpenAI-compatible chat; `"stream": true` for SSE, `false` for one JSON object |
+| `/v1/completions`                      | POST   | OpenAI legacy text completion                          |
+| `/v1/models`                           | GET    | Single `deepseek-r1` entry with `max_model_len`        |
+| `/generate`                            | POST   | sglang-native generation (`text` + `sampling_params`, batched) |
+| `/server_info` (alias `/get_server_info`) | GET  | sglang server info incl. `max_total_num_tokens`        |
+| `/get_model_info`                      | GET    | sglang model info incl. `max_context_len`              |
+| `/model_info`                          | GET    | sglang model info incl. `max_model_len`                |
+| `/health`                              | GET    | Liveness probe (`"ok"`)                                |
 
 The request `model` field is echoed back; upstream always uses the configured
 `function_english_name` (default `deepseek_r1`).
+
+### Tool calling
+
+The upstream Youdao LLM is a plain text model — it cannot emit OpenAI
+`tool_calls` natively. When a request's `tools` array is non-empty the proxy
+injects the tool schemas plus a `[TOOL_CALL]{...}` marker protocol into the
+prompt, and parses the model's marker output back into OpenAI `tool_calls`
+(`finish_reason: "tool_calls"`, one delta per call in streaming mode). The
+parser is deliberately lenient: the model is flaky about the exact shape
+(missing closing marker, flattened arguments, or a batched top-level
+`commands` array), and all of those are normalized into calls.
+
+Multi-turn agent history is flattened into the stateless single-`input` the
+upstream endpoint expects, so an agentic loop (assistant `tool_calls` +
+`tool`-role results) keeps working. `coding_demo.sh` in the repo drives a
+small coding task end-to-end through the local service.
 
 ## Build
 
@@ -151,6 +176,7 @@ the Youdao macOS dict app. The full field list is in
 | `YOUDAO_YDUUID`       | *(empty)*                     | device identity (see note)         |
 | `YOUDAO_COOKIE`       | *(empty)*                     | device cookies for the upstream     |
 | `YOUDAO_TOKEN`        | *(empty)*                     | override the guest token (logged-in `ydtoken`) |
+| `YOUDAO_MAX_CONTEXT`  | `131072`                      | context window reported to clients as `max_model_len` / `max_context_len` / `max_total_num_tokens` |
 
 Other `YOUDAO_*` vars — `client`/`product`/version, `keyfrom`, request
 headers, etc. — follow the defaults table in [`src/config.rs`](src/config.rs).
@@ -182,6 +208,58 @@ curl -sN http://127.0.0.1:8080/v1/chat/completions \
 
 The response carries both `content` and `reasoning_content` (the chain of
 thought) when the upstream model provides it.
+
+### OpenAI SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+
+# plain chat
+resp = client.chat.completions.create(
+    model="deepseek-r1",
+    messages=[{"role": "user", "content": "写一首五言绝句"}],
+)
+print(resp.choices[0].message.content)
+
+# tool calling: run the returned calls yourself, append the results as
+# `tool`-role messages (with `tool_call_id`), and call again until
+# `finish_reason` is "stop"
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "Bash",
+        "description": "Run a shell command on the local machine.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}]
+resp = client.chat.completions.create(
+    model="deepseek-r1",
+    messages=[{"role": "user", "content": "检查本机 brew 是否可用"}],
+    tools=TOOLS,
+    tool_choice="auto",
+)
+for tc in resp.choices[0].message.tool_calls or []:
+    print(tc.function.name, tc.function.arguments)
+```
+
+### sglang-native
+
+```bash
+# one-shot generation
+curl -s http://127.0.0.1:8080/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"你好","stream":false}'
+
+# retrieve the context window
+curl -s http://127.0.0.1:8080/model_info
+# -> "max_model_len": 131072  (override the default with YOUDAO_MAX_CONTEXT)
+```
 
 ## Security
 
