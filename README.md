@@ -64,8 +64,9 @@ injects the tool schemas plus a `[TOOL_CALL]{...}` marker protocol into the
 prompt, and parses the model's marker output back into OpenAI `tool_calls`
 (`finish_reason: "tool_calls"`, one delta per call in streaming mode). The
 parser is deliberately lenient: the model is flaky about the exact shape
-(missing closing marker, flattened arguments, or a batched top-level
-`commands` array), and all of those are normalized into calls. A marker whose
+(missing closing marker, flattened arguments, a paren-wrapped object
+(`[TOOL_CALL]({json})`), or a batched top-level `commands` array), and all of
+those are normalized into calls. A marker whose
 JSON cannot be parsed at all (an object that never closes, malformed JSON) is
 a failed tool call, so it is dropped from the visible `content` (with a WARN
 log) rather than leaked to the client; the model typically re-emits the

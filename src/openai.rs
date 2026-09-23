@@ -186,12 +186,13 @@ fn tool_protocol(
 /// `[TOOL_CALL]{...}` blocks. It is *flaky* about the exact shape — it sometimes
 /// omits the closing `[/TOOL_CALL]` marker, flattens the arguments into
 /// top-level fields (e.g. `{"name":"Bash","command":"..."}` instead of
-/// `{"name":"Bash","arguments":{"command":"..."}}`), batches several
-/// commands into a top-level `commands` array, or emits a broken block
-/// outright (an object that never closes, a stray `]` where the final `}`
-/// should be). So this parser is lenient: it grabs the first balanced-JSON
-/// object after each opening marker (with or without a closing marker) and
-/// normalizes it to one or more OpenAI tool calls.
+/// `{"name":"Bash","arguments":{"command":"..."}}`), wraps the JSON in
+/// parens (`[TOOL_CALL]({"name":...})`), batches several commands into a
+/// top-level `commands` array, or emits a broken block outright (an object
+/// that never closes, a stray `]` where the final `}` should be). So this
+/// parser is lenient: it grabs the first balanced-JSON object after each
+/// opening marker (with or without a closing marker, with or without a
+/// paren wrapper) and normalizes it to one or more OpenAI tool calls.
 ///
 /// A marker whose JSON cannot be parsed is a failed tool call, not prose —
 /// keeping it would leak raw `[TOOL_CALL]{...}` text into the visible reply
@@ -220,11 +221,15 @@ pub fn parse_tool_calls(content: &str) -> (String, Vec<serde_json::Value>) {
             Some(rel) => {
                 let mark_start = i + rel;
                 cleaned.push_str(&content[i..mark_start]);
-                // Skip whitespace/newlines to the first '{'.
+                // Skip wrapper chars (whitespace and `(`) to the first '{'.
+                // The model sometimes wraps the JSON in parens:
+                // `[TOOL_CALL]({"name":...})` — only `(` / whitespace are
+                // skipped, so real prose before a `{` still reads as "no
+                // JSON after the marker" (kept literal, not swallowed).
                 let mut k = mark_start + OPEN.len();
                 while k < n {
                     let ch = content[k..].chars().next().unwrap();
-                    if ch.is_whitespace() {
+                    if ch.is_whitespace() || ch == '(' {
                         k += ch.len_utf8();
                     } else {
                         break;
@@ -296,7 +301,10 @@ fn consume_past_close_marker(content: &str, end: usize) -> usize {
     let mut m = end;
     while m < content.len() {
         let ch = content[m..].chars().next().unwrap();
-        if ch.is_whitespace() {
+        // Skip wrapper chars on the closing side (whitespace and `)` — the
+        // close of the paren-wrapped shape `[TOOL_CALL]({json})`), then the
+        // optional `[/TOOL_CALL]` marker.
+        if ch.is_whitespace() || ch == ')' {
             m += ch.len_utf8();
         } else {
             break;
@@ -767,5 +775,37 @@ mod tests {
         );
         assert!(cleaned.contains("格式是 [TOOL_CALL] 后跟 JSON"));
         assert!(!cleaned.contains("uptime"));
+    }
+
+    #[test]
+    fn parses_paren_wrapped_json_marker() {
+        // Regression, live session "排查本地 kubectl服务故障" (2026-09-23): the
+        // model wrapped every tool-call JSON in parens,
+        // `[TOOL_CALL]({"name":...})[/TOOL_CALL]`. The old parser required `{`
+        // to follow the opening marker (modulo whitespace), saw `(`, and fell
+        // into the "no JSON, keep literal" branch — leaking every marker into
+        // the visible content and yielding zero tool_calls.
+        let content = concat!(
+            "\n\n我来查 d4 节点上的 pod 分布、内存配额和历史惩罚记录。\n\n",
+            "[TOOL_CALL]({\"name\":\"Bash\",\"arguments\":{\"command\":\"kubectl get pods -A --field-selector spec.nodeName=d4 -o wide\",\"description\":\"查看 d4 节点上的所有 pod 分布\"}})[/TOOL_CALL]\n",
+            "[TOOL_CALL]({\"name\":\"Bash\",\"arguments\":{\"command\":\"kubectl describe node d4 | grep -A30 'Non-terminated Pods'\",\"description\":\"查看 d4 节点的 pod 资源分配情况\"}})[/TOOL_CALL]",
+        );
+        let (cleaned, calls) = parse_tool_calls(content);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].pointer("/function/name").unwrap(), "Bash");
+        let args0: serde_json::Value =
+            serde_json::from_str(calls[0].pointer("/function/arguments").unwrap().as_str().unwrap())
+                .unwrap();
+        assert!(args0["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("kubectl get pods -A --field-selector spec.nodeName=d4"));
+        assert_eq!(
+            calls[1].pointer("/function/arguments").unwrap().as_str().unwrap(),
+            "{\"command\":\"kubectl describe node d4 | grep -A30 'Non-terminated Pods'\",\"description\":\"查看 d4 节点的 pod 资源分配情况\"}"
+        );
+        assert!(cleaned.contains("我来查 d4 节点上的 pod 分布"));
+        assert!(!cleaned.contains("[TOOL_CALL]"), "marker leaked: {cleaned}");
+        assert!(!cleaned.contains("kubectl"), "paren-wrapped block leaked: {cleaned}");
     }
 }
